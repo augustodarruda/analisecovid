@@ -1,0 +1,181 @@
+---
+title: "Data Wrangling for COVID-19 Data in Brazil"
+output: html_notebook
+---
+
+# Packages
+```{r}
+library(datacovidbr)    # import data from datacovidbr package
+library(dplyr)          # data procesing
+library(ggplot2)        # data plotting
+library(tidyr)          # organize data
+library(lubridate)      # manipulate dates
+library(RColorBrewer)   # color pallets
+library(magrittr)       # pipes
+library(data.table)     # manipulate data
+library(inspectdf)      # library to inspect data frames
+library(scales)         # change scales in plots
+```
+
+
+
+#  Importing Data
+
+We're going to use the datacovidbr package from freguglia avaliable in his GitHub page which already
+pre-process the data for us. We have 4 different datasets which we could work, 3 from Brazil(health minister,brasil.io and infoGripe) and the CSSEGISandData from John Hopkins University
+https://github.com/Freguglia/datacovidbr
+
+In this script we are going to use the dataset from the Health Ministry
+
+```{r}
+df <- brMinisterioSaude() #importing data
+```
+
+# Data Wrangling
+
+Transforming variables into correct form
+
+```{r}
+inspect_types(df) %>% show_plot()
+```
+
+We can see that we have 6 characters colmuns, and we suspect that a lot of the should be transformed into factors, so let's take a look at them and choose which columns we will coerce to factors
+
+```{r}
+glimpse(df)
+```
+
+It might be interisting to change the columns name to a more friendly name, so first let's do that so we can change some of them to factors. Since a lot of names is in Portuguese, we will change only a few to english, specially the mains one
+
+```{r}
+# Renaming some columns
+df <-
+  df %>%
+  rename(epiweek = semanaEpi,
+         pop = populacaoTCU2019,
+         cases = casosAcumulado,
+         daily_cases = casosNovos,
+         deaths = obitosAcumulado,
+         daily_deaths = obitosNovos,
+         daily_recovered = Recuperadosnovos,
+         daily_tracking = emAcompanhamentoNovos)
+```
+
+Now let's change some variables to factors and integers
+
+```{r}
+col_fac <- c("regiao","estado","municipio","nomeRegiaoSaude")
+
+# columns to factor
+df <-
+  df %<>%
+       mutate_each_(funs(factor(.)),col_fac)
+
+# column codRegiaoSaude and  to integer
+df$codRegiaoSaude <- as.integer(df$codRegiaoSaude)
+df$`interior/metropolitana`<- as.integer(df$`interior/metropolitana`)
+```
+
+Removing 2 columns that are entirely NA`s
+```{r}
+df$daily_recovered <- NULL
+df$daily_tracking <- NULL
+```
+
+Now we can start adding some stats to a more interesting data analysis
+
+# ADDING STATS
+
+Since we're going to analyze the 5 different regions from Brazil, we can summarize the data.
+Besides that, we will compare percentages relative to the total cases in Brazil.
+
+```{r}
+df_region <- df %>% 
+  filter(is.na(municipio) & regiao != "Brasil" & pop > 0) %>% # selecting data per region
+  group_by(date,regiao) %>% #goup_by region
+  summarise(cases = sum(cases),
+            daily_cases = sum(daily_cases),
+            deaths = sum(deaths),
+            daily_deaths = sum(daily_deaths),
+            pop = sum(pop)) %>% # Selecionando colunas de dados
+  select(date,regiao,cases,daily_cases,deaths,daily_deaths,pop)
+```
+
+Since we will use percentages to the total cases in Brazil, let's filter the whole country cases
+
+```{r}
+df_br <- df %>%
+  filter(regiao == "Brasil") %>%
+  select(date,regiao,cases,daily_cases,deaths,daily_deaths,pop)
+```
+
+Full join them together so we can calculate our stats
+```{r}
+df_region <- full_join(df_region, df_br, by = 'date')
+```
+
+Now we have cases.x for ou regional data and cases.y for the total in Brazil, we can calcualte some percentages
+
+```{r}
+df_region <- 
+  df_region %>%
+  mutate(pct_total_cases = (cases.x/cases.y)) %>%
+  mutate(pct_daily_cases = (daily_cases.x/daily_cases.y)) %>%
+  mutate(pct_total_deaths = (deaths.x/deaths.y)) %>%
+  mutate(pct_daily_deaths = (daily_deaths.x/daily_deaths.y))
+
+# weekly avereges
+
+df_region <- df_region %>%
+  group_by(regiao.x) %>%
+  mutate(weekly_avg_pct_daily_cases = frollmean(pct_daily_cases,7)) %>%
+  mutate(weekly_avg_daily_cases = frollmean(daily_cases.x,7)) %>%
+  mutate(weekly_avg_pct_daily_deaths = frollmean(pct_daily_deaths,7)) %>%
+  mutate(weekly_avg_daily_deaths = frollmean(daily_deaths.x,7)) %>%
+  # per capita numbers
+  mutate(cases_100k = (cases.x/pop.x)*100000) %>%
+  mutate(daily_cases_100k = (daily_cases.x/pop.x)*100000)%>%
+  mutate(deaths_100k = (deaths.x/pop.x)*100000) %>%
+  # weekly average per capita
+  mutate(weekly_avg_daily_cases_100k = (weekly_avg_daily_cases/pop.x)*100000) %>%
+  mutate(weekly_avg_daily_cases_mil = (weekly_avg_daily_cases/pop.x)*1000000) %>%
+  mutate(weekly_avg_daily_deaths_100k = (weekly_avg_daily_deaths/pop.x)*100000) %>%
+  mutate(weekly_avg_daily_deaths_mil = (weekly_avg_daily_deaths/pop.x)*1000000) %>%
+  mutate(RM_weekly_avg_daily_cases_100k = frollmean(weekly_avg_daily_cases_100k,7)) %>%
+  mutate(RM_weekly_avg_daily_cases_mil = frollmean(weekly_avg_daily_cases_mil,7)) %>%
+  mutate(RM_weekly_avg_daily_deaths_100k = frollmean(weekly_avg_daily_deaths_100k,7))
+```
+
+Now we have +18 variables that we can work with, let's take a look at some examples
+
+```{r}
+ggplot(df_region) +
+ aes(x = date, y = pct_total_cases, colour = regiao.x) +
+ geom_line(size = 1L) +
+ scale_color_hue() +
+ theme_minimal()
+```
+
+The following code will show the rolling mean for the 5 different regions of Brazil and will include the rolling mean curve of Brazil
+```{r}
+ggplot(df_region,aes(x=date, color = regiao.x)) +
+ geom_smooth(aes(x = date,y= daily_deaths.y , color = "Brasil"), se = FALSE) +
+ geom_line(aes(x = date,y = weekly_avg_daily_deaths), se = F) +
+ scale_color_hue() +
+ scale_y_continuous(breaks = seq(0,1100,100)) +
+ scale_x_date(date_breaks = "2 week", date_labels = '%d-%b') +
+ theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + theme(axis.title = element_text(size = 12, 
+    face = "italic"), plot.title = element_text(size = 15, 
+    face = "bold", hjust = 0.5, vjust = 1.5), 
+    legend.text = element_text(size = 10, 
+        face = "bold"), legend.title = element_text(size = 12, 
+        face = "bold"), legend.key = element_rect(fill = NA), 
+    legend.background = element_rect(fill = NA, 
+        size = 0)) +labs(title = "Média móvel de mortes diárias", 
+    x = "Data", y = "Média de mortes", colour = "Região") + theme(legend.key = element_rect(fill = "white", 
+    colour = "white"), legend.background = element_rect(fill = "white", 
+    colour = "white"))
+```
+
+
